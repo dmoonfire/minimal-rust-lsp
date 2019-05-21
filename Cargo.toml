@@ -1,0 +1,17 @@
+[package]
+name = "lsp"
+version = "0.1.0"
+authors = ["Dylan Moonfire <d.moonfire@mfgames.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+gen_lsp_server = "0.1.0"        # https://crates.io/crates/gen_lsp_server
+#lsp-types = "0.57.0"           # In https://github.com/rust-analyzer/rust-analyzer/blob/master/crates/gen_lsp_server/Cargo.toml
+languageserver-types = "0.51.1" # This version showed up in the build.
+log = "0.4.3"
+failure = "0.1.4"
+serde_json = "1.0.34"
+serde = { version = "1.0.83", features = ["derive"] }
+crossbeam-channel = "0.3.5"
