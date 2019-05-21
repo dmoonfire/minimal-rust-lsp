@@ -1,83 +1,85 @@
-extern crate gen_lsp_server;
-extern crate languageserver_types;
-extern crate failure;
-extern crate crossbeam_channel;
+use crossbeam_channel::{bounded, Receiver, Sender};
+use failure::*;
+use log::*;
+use std::{
+    io::{stdin, stdout, BufRead, Write},
+    thread,
+};
 
-use crossbeam_channel::{Sender, Receiver};
-use languageserver_types::{ServerCapabilities, InitializeParams, request::{GotoDefinition, GotoDefinitionResponse}};
-use gen_lsp_server::{stdio_transport, handle_shutdown, RawMessage, RawResponse};
+mod msg;
 
 fn main() -> Result<(), failure::Error> {
-    let (receiver, sender, io_threads) = stdio_transport();
-    gen_lsp_server::run_server(
-        ServerCapabilities::default(),
-        receiver,
-        sender,
-        main_loop,
-    )?;
-    io_threads.join()?;
+    simple_logger::init()?;
+    info!("starting example server");
+
+    // A limited version.
+    {
+        let (receiver, _sender, io_threads) = stdio_transport();
+
+        trace!("before internal receiver.recv");
+        let req = match receiver.recv() {
+            Ok(req) => req,
+            msg => bail!("expected internal initialize request, got {:?}", msg),
+        };
+        info!("req {:?}", req);
+        io_threads.join()?;
+        info!("after join");
+    }
+
     Ok(())
 }
 
-fn main_loop(
-    _params: InitializeParams,
-    receiver: &Receiver<RawMessage>,
-    sender: &Sender<RawMessage>,
-) -> Result<(), failure::Error> {
-    for msg in receiver {
-        match msg {
-            RawMessage::Request(req) => {
-                let req = match handle_shutdown(req, sender) {
-                    None => return Ok(()),
-                    Some(req) => req,
-                };
-                let req = match req.cast::<GotoDefinition>() {
-                    Ok((id, _params)) => {
-                        let resp = RawResponse::ok::<GotoDefinition>(
-                            id,
-                            &Some(GotoDefinitionResponse::Array(Vec::new())),
-                        );
-                        sender.send(RawMessage::Response(resp));
-                        continue;
-                    },
-                    Err(req) => req,
-                };
-                // ...
-            }
-            RawMessage::Response(_resp) => (),
-            RawMessage::Notification(_not) => (),
+pub fn stdio_transport() -> (Receiver<String>, Sender<String>, Threads) {
+    trace!("stdio_transport");
+
+    let (writer_sender, writer_receiver) = bounded::<String>(16);
+    let writer = thread::spawn(move || {
+        let stdout = stdout();
+        let mut stdout = stdout.lock();
+        writer_receiver.into_iter().for_each(|it| {
+            info!("Got server output: {:?}", it);
+            stdout.write(it.as_ref()).unwrap();
+        });
+        Ok(())
+    });
+    let (reader_sender, reader_receiver) = bounded::<String>(16);
+    let reader = thread::spawn(move || {
+        let stdin = stdin();
+        let mut stdin = stdin.lock();
+        while let Some(msg) = read(&mut stdin)? {
+            info!("Got user input: {:?}", msg);
+            reader_sender.send(msg).unwrap();
+        }
+        Ok(())
+    });
+    let threads = Threads { reader, writer };
+    (reader_receiver, writer_sender, threads)
+}
+
+pub struct Threads {
+    reader: thread::JoinHandle<Result<(), failure::Error>>,
+    writer: thread::JoinHandle<Result<(), failure::Error>>,
+}
+
+impl Threads {
+    pub fn join(self) -> Result<(), failure::Error> {
+        match self.reader.join() {
+            Ok(r) => r?,
+            Err(_) => bail!("reader panicked"),
+        }
+        match self.writer.join() {
+            Ok(r) => r,
+            Err(_) => bail!("writer panicked"),
         }
     }
-    Ok(())
 }
 
-/*
-error[E0631]: type mismatch in function arguments
-  --> src\main.rs:12:5
-   |
-12 |       gen_lsp_server::run_server(
-   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected signature of `fn(languageserver_types::InitializeParams, &crossbeam_channel::internal::channel::Receiver<gen_lsp_server::RawMessage>, &crossbeam_channel::internal::channel::Sender<gen_lsp_serv
-er::RawMessage>) -> _`
-...
-22 | / fn main_loop(
-23 | |     _params: InitializeParams,
-24 | |     receiver: &Receiver<RawMessage>,
-25 | |     sender: &Sender<RawMessage>,
-...  |
-51 | |     Ok(())
-52 | | }
-   | |_- found signature of `for<'r, 's> fn(languageserver_types::InitializeParams, &'r crossbeam_channel::Receiver<gen_lsp_server::RawMessage>, &'s crossbeam_channel::Sender<gen_lsp_server::RawMessage>) -> _`
-   |
-   = note: required by `gen_lsp_server::run_server`
+pub fn read(r: &mut impl BufRead) -> Result<Option<String>, failure::Error> {
+    let mut buf = String::new();
 
-error[E0308]: mismatched types
-  --> src\main.rs:30:54
-   |
-30 |                 let req = match handle_shutdown(req, sender) {
-   |                                                      ^^^^^^ expected struct `crossbeam_channel::internal::channel::Sender`, found struct `crossbeam_channel::Sender`
-   |
-   = note: expected type `&crossbeam_channel::internal::channel::Sender<gen_lsp_server::RawMessage>`
-              found type `&crossbeam_channel::Sender<gen_lsp_server::RawMessage>`
+    if r.read_line(&mut buf)? == 0 {
+        return Ok(None);
+    }
 
-error: aborting due to 2 previous errors
-    */
+    Ok(Some(buf))
+}
